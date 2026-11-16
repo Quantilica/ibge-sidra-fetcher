@@ -92,3 +92,6 @@ source = ["ibge_sidra_fetcher"]
 # Cobertura abaixo de 80%: relatório informativo (dispensa temporária, ver planning/notes/2026-11-04-ci-pyright-cobertura-dispensas.md).
 show_missing = true
 skip_covered = true
+
+[tool.uv]
+required-version = ">=0.9"
