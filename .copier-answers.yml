@@ -1,0 +1,18 @@
+_commit: v0.2.1
+_src_path: /home/dk/code/Quantilica/fetcher-template
+author_email: daniel@dkko.me
+author_name: Komesu, D.K.
+cadencia: monthly
+description: A Python package for fetching data from IBGE's SIDRA and Agregados APIs
+domain: ibge
+dominio: macroeconomia
+has_lake: false
+homepage: https://www.ibge.gov.br/
+licenca: Sem licença declarada; dados públicos pela Lei 12.527/2011 (LAI) e Decreto
+    8.777/2016
+orgao: Instituto Brasileiro de Geografia e Estatística (IBGE)
+package_name: ibge-sidra-fetcher
+package_slug: ibge_sidra_fetcher
+protocol: http
+source_id: ibge-sidra
+source_name: IBGE - SIDRA e Agregados
