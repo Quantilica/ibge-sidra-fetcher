@@ -94,7 +94,7 @@ def test_save_load_roundtrip_writes_manifest(tmp_path: Path):
     import json
 
     manifest_data = json.loads(manifest_p.read_text(encoding="utf-8"))
-    assert manifest_data["source_id"] == "sidra"
+    assert manifest_data["source_id"] == "ibge-sidra"
     assert load_agregado(path) == agregado
 
 
@@ -120,3 +120,38 @@ def test_load_agregado_empty_collections(tmp_path: Path):
     save_agregado(agregado, path)
 
     assert load_agregado(path) == agregado
+
+
+def test_iter_dados_tabela_junta_pedacos_e_usa_a_ultima_versao(tmp_path: Path):
+    """A mesclagem é etapa de leitura: cabeçalho uma vez, última versão vence."""
+    import json
+
+    from ibge_sidra_fetcher.reader import iter_dados_tabela, listar_arquivos_tabela
+
+    pasta = tmp_path / "t-9"
+    pasta.mkdir()
+
+    def grava(nome: str, linhas: list) -> None:
+        (pasta / nome).write_text(json.dumps(linhas), encoding="utf-8")
+
+    cab = {"NC": "Nível Territorial (Código)", "V": "Valor"}
+    grava(
+        "t-9_p-201201_f-a_n3-all_v-all@20120301.json", [cab, {"NC": "3", "V": "velho"}]
+    )
+    grava(
+        "t-9_p-201201_f-a_n3-all_v-all@20130101.json", [cab, {"NC": "3", "V": "novo"}]
+    )
+    grava("t-9_p-201202_f-a_n3-all_v-all@20120401.json", [cab, {"NC": "3", "V": "b"}])
+    grava("t-9_p-201201_f-a_n6-all_v-all@20120301.json", [cab, {"NC": "6", "V": "m"}])
+    grava("metadados@20260101.json", [])
+    (pasta / "t-9_p-201201_f-a_n3-all_v-all@20130101.json.manifest.json").write_text(
+        "{}"
+    )
+
+    assert len(listar_arquivos_tabela(tmp_path, 9)) == 3
+    assert len(listar_arquivos_tabela(tmp_path, 9, ultima_versao=False)) == 4
+    assert len(listar_arquivos_tabela(tmp_path, 9, nivel="N6")) == 1
+
+    linhas = list(iter_dados_tabela(tmp_path, 9, nivel="N3"))
+    assert linhas == [cab, {"NC": "3", "V": "novo"}, {"NC": "3", "V": "b"}]
+    assert list(iter_dados_tabela(tmp_path, 404)) == []

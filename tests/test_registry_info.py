@@ -38,4 +38,4 @@ def test_repositorio_segue_a_regra(project: dict) -> None:
 
 def test_apelidos_e_source_id() -> None:
     assert fetcher.info.aliases == ("sidra", "ibge")
-    assert fetcher.source_id == "sidra"
+    assert fetcher.source_id == "ibge-sidra"

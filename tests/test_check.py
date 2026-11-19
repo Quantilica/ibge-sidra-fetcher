@@ -15,8 +15,9 @@ from typer.testing import CliRunner
 
 from ibge_sidra_fetcher.agregados import Periodo
 from ibge_sidra_fetcher.check import check_agregado
-from ibge_sidra_fetcher.download import DownloadChunk
+from ibge_sidra_fetcher.download import DownloadChunk, DownloadResult
 from ibge_sidra_fetcher.plugin import app
+from ibge_sidra_fetcher.sidra import Parametro
 
 runner = CliRunner()
 
@@ -31,11 +32,17 @@ def _agregado(periodos: list[Periodo], nome: str = "Agregado Fake") -> SimpleNam
     )
 
 
-def _chunk(nivel: str, periodos: list[str]) -> DownloadChunk:
+def _chunk(nivel: str, periodo: str) -> DownloadChunk:
     return DownloadChunk(
         nivel_territorial=nivel,
-        parametro=SimpleNamespace(periodos=list(periodos)),
-        n_valores=len(periodos) or 1,
+        parametro=Parametro(
+            agregado="1705",
+            territorios={nivel.removeprefix("N"): []},
+            variaveis=[],
+            periodos=[periodo],
+            classificacoes={},
+        ),
+        n_valores=1,
     )
 
 
@@ -61,8 +68,25 @@ def _client_2niveis() -> _FakeClient:
         _periodo("202302", dt.date(2024, 2, 1)),
     ]
     agregado = _agregado(periodos)
-    chunks = [_chunk("N1", ["202301", "202302"]), _chunk("N3", [])]
+    chunks = [
+        _chunk("N1", "202301"),
+        _chunk("N1", "202302"),
+        _chunk("N3", "202301"),
+        _chunk("N3", "202302"),
+    ]
     return _FakeClient(agregado, chunks)
+
+
+def _grava(tmp_path: Path, nivel: str, periodo: str, data: str) -> Path:
+    n = nivel.removeprefix("N")
+    arq = tmp_path / "t-1705" / f"t-1705_p-{periodo}_f-a_n{n}-all_v-all@{data}.json"
+    arq.parent.mkdir(parents=True, exist_ok=True)
+    arq.write_text("[]", encoding="utf-8")
+    return arq
+
+
+def _por_nivel(veredictos) -> dict:
+    return {v["partition"]: (v["action"], v["reason"]) for v in veredictos}
 
 
 def test_check_tudo_ausente_baixa(tmp_path: Path) -> None:
@@ -76,39 +100,40 @@ def test_check_tudo_ausente_baixa(tmp_path: Path) -> None:
     assert veredictos[0]["remote_last_modified"] == "2024-02-01"
     assert veredictos[0]["entry"]["filtros"] == {}
     assert veredictos[0]["entry"]["nivel"] == "N1"
+    assert veredictos[0]["entry"]["n_arquivos"] == 2
+    assert not (tmp_path / "t-1705").exists()  # check não cria nada
 
 
-def test_check_nivel_fresco_pula(tmp_path: Path) -> None:
-    """NDJSON mais novo que max(modificacao) gera skip-up-to-date."""
+def test_check_frescor_por_existencia_do_arquivo_com_a_data_da_api(
+    tmp_path: Path,
+) -> None:
+    """Todos os arquivos com a data certa existem: skip-up-to-date."""
+    _grava(tmp_path, "N1", "202301", "20230601")
+    _grava(tmp_path, "N1", "202302", "20240201")
     veredictos, _ = check_agregado(_client_2niveis(), 1705, tmp_path, {})
-    (tmp_path / "dados_N1.ndjson").write_text("{}\n", encoding="utf-8")
-    veredictos, _ = check_agregado(_client_2niveis(), 1705, tmp_path, {})
-    por_nivel = {v["partition"]: (v["action"], v["reason"]) for v in veredictos}
+    por_nivel = _por_nivel(veredictos)
     assert por_nivel["N1"] == ("skip-up-to-date", "local-fresh")
     assert por_nivel["N3"] == ("download", "not-present")
 
 
-def test_check_nivel_desatualizado_baixa(tmp_path: Path) -> None:
-    """NDJSON mais antigo que max(modificacao) gera download/remote-newer."""
-    alvo = tmp_path / "dados_N3.ndjson"
-    alvo.write_text("{}\n", encoding="utf-8")
-    antigo = dt.datetime(2020, 1, 1).timestamp()
-    os.utime(alvo, (antigo, antigo))
+def test_check_ignora_mtime(tmp_path: Path) -> None:
+    """Arquivo velho no disco, mas com o nome da data da API, continua fresco."""
+
+    for periodo, data in (("202301", "20230601"), ("202302", "20240201")):
+        arq = _grava(tmp_path, "N1", periodo, data)
+        antigo = dt.datetime(2000, 1, 1).timestamp()
+        os.utime(arq, (antigo, antigo))
     veredictos, _ = check_agregado(_client_2niveis(), 1705, tmp_path, {})
-    por_nivel = {v["partition"]: (v["action"], v["reason"]) for v in veredictos}
-    assert por_nivel["N3"] == ("download", "remote-newer")
+    assert _por_nivel(veredictos)["N1"] == ("skip-up-to-date", "local-fresh")
 
 
-def test_check_nested_agregado_path(tmp_path: Path) -> None:
-    """NDJSON gravado sob agregados/{id}/dados_{nivel}.ndjson é reconhecido."""
-    nested = tmp_path / "agregados" / "1705" / "dados_N1.ndjson"
-    nested.parent.mkdir(parents=True, exist_ok=True)
-    nested.write_text("{}\n", encoding="utf-8")
-
+def test_check_revisao_do_ibge_pede_download(tmp_path: Path) -> None:
+    """Arquivo com a data antiga: a data nova da API não existe, então baixa."""
+    _grava(tmp_path, "N3", "202301", "20230601")
+    antigo = _grava(tmp_path, "N3", "202302", "20230901")  # API diz 20240201
     veredictos, _ = check_agregado(_client_2niveis(), 1705, tmp_path, {})
-    por_nivel = {v["partition"]: (v["action"], v["reason"]) for v in veredictos}
-    assert por_nivel["N1"] == ("skip-up-to-date", "local-fresh")
-    assert por_nivel["N3"] == ("download", "not-present")
+    assert _por_nivel(veredictos)["N3"] == ("download", "remote-newer")
+    assert antigo.exists()
 
 
 def test_sync_e_download_produzem_mesmo_plano(monkeypatch, tmp_path: Path) -> None:
@@ -148,7 +173,7 @@ class _NoNetClient:
 
     def download_dados_agregado(self, agregado_id: int, output, **kwargs):
         self.download_kwargs = kwargs
-        return []
+        return DownloadResult()
 
 
 def test_sync_from_plan_restringe_niveis(monkeypatch, tmp_path: Path) -> None:
@@ -234,6 +259,6 @@ def test_check_json_tem_ids_completos(monkeypatch, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert [it["id"] for it in data["items"]] == [
-        "dados_N1.ndjson",
-        "dados_N3.ndjson",
+        "t-1705:N1",
+        "t-1705:N3",
     ]

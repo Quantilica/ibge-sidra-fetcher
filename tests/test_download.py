@@ -1,13 +1,15 @@
 # Copyright (c) 2026 Komesu, D.K.
 # Licensed under the MIT License.
 
+import datetime as dt
+import hashlib
 import itertools
 import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 from quantilica.core.exceptions import FetchError
 from quantilica.core.http import RateLimiter
@@ -46,7 +48,7 @@ def _make_agregado(
     o chunking sem depender de dados reais do IBGE.
     """
     periodos = [
-        Periodo(id=f"p{i:04d}", literals=[], modificacao=Mock())
+        Periodo(id=f"p{i:04d}", literals=[], modificacao=dt.date(2020, 1, 1))
         for i in range(n_periodos)
     ]
     localidades = [
@@ -164,15 +166,21 @@ class TestPlanAgregadoDownload(unittest.TestCase):
             n_periodos=2, n_localidades=3, n_variaveis=2, categoria_counts=[2, 3]
         )
         chunks = plan_agregado_download(agregado)
-        self.assertEqual(len(chunks), 1)
-        chunk = chunks[0]
-        self.assertEqual(chunk.nivel_territorial, "N1")
-        self.assertEqual(chunk.parametro.territorios, {"1": []})
-        self.assertEqual(chunk.parametro.variaveis, [])
-        self.assertEqual(chunk.parametro.periodos, [])
-        self.assertEqual(chunk.parametro.classificacoes, {"1": [], "2": []})
+        # Um pedaço por período, mesmo que a tabela inteira coubesse no limite.
+        self.assertEqual(len(chunks), 2)
+        for chunk, periodo in zip(chunks, agregado.periodos, strict=True):
+            self.assertEqual(chunk.nivel_territorial, "N1")
+            self.assertEqual(chunk.parametro.territorios, {"1": []})
+            self.assertEqual(chunk.parametro.variaveis, [])
+            self.assertEqual(chunk.parametro.periodos, [periodo.id])
+            self.assertEqual(chunk.parametro.classificacoes, {"1": [], "2": []})
         esperado = calculate_aggregate(agregado)["total_size"]
-        self.assertEqual(chunk.n_valores, esperado)
+        self.assertEqual(sum(c.n_valores for c in chunks), esperado)
+
+    def test_plan_periodo_unico_nao_fixa_periodo(self):
+        agregado = _make_agregado(n_periodos=1, n_localidades=3, n_variaveis=2)
+        (chunk,) = plan_agregado_download(agregado)
+        self.assertEqual(chunk.parametro.periodos, [])
 
     def test_no_chunk_exceeds_limit(self):
         agregado = _make_agregado(n_periodos=50, n_localidades=30, n_variaveis=2)
@@ -271,7 +279,7 @@ class TestPlanAgregadoDownload(unittest.TestCase):
                     ],
                 ),
             ],
-            periodos=[Periodo(id="p0", literals=[], modificacao=Mock())],
+            periodos=[Periodo(id="p0", literals=[], modificacao=dt.date(2020, 1, 1))],
             localidades=[
                 Localidade(
                     id="loc0", nome="Loc0", nivel=NivelTerritorial(id="N1", nome="N1")
@@ -344,13 +352,16 @@ class TestPlanAgregadoDownload(unittest.TestCase):
             variaveis=variaveis_restritas,
             classificacoes={cid: categorias_restritas},
         )
-        self.assertEqual(len(chunks), 1)
+        self.assertEqual(len(chunks), 2)
         chunk = chunks[0]
-        # Sem restrição, o total seria 5*3*4*3=180; restrito deve ser 2*3*1*2=12.
-        self.assertEqual(chunk.n_valores, 12)
+        # Sem restrição, o total seria 5*3*4*3=180; restrito deve ser 2*3*1*2=12
+        # (6 por período, um pedaço por período).
+        self.assertEqual(sum(c.n_valores for c in chunks), 12)
         # A restrição precisa aparecer explicitamente no Parametro renderizado
         # — não pode "cair" para "all" só porque coube num único chunk.
-        self.assertEqual(chunk.parametro.periodos, periodos_restritos)
+        self.assertEqual(
+            [c.parametro.periodos for c in chunks], [[p] for p in periodos_restritos]
+        )
         self.assertEqual(chunk.parametro.variaveis, variaveis_restritas)
         self.assertEqual(chunk.parametro.classificacoes[cid], categorias_restritas)
 
@@ -407,6 +418,7 @@ def _make_mock_response(data: object) -> MagicMock:
     mock_response.raise_for_status.return_value = None
     mock_response.url = "http://mock"
     mock_response.json.return_value = data
+    mock_response.content = json.dumps(data, ensure_ascii=False).encode("utf-8")
     return mock_response
 
 
@@ -476,40 +488,95 @@ class TestClientDownload(unittest.TestCase):
                     agregado.id, tmp_dir, agregado=agregado, limit=1, max_workers=1
                 )
 
-    def test_download_agregado_dados_writes_ndjson_and_manifest(self):
+    def _agregado_com_datas(self):
+        agregado = self._make_agregado_2_periodos()
+        agregado.periodos[0].modificacao = dt.date(2024, 3, 5)
+        agregado.periodos[1].modificacao = dt.date(2024, 4, 6)
+        return agregado
+
+    def test_download_grava_um_arquivo_por_consulta_com_resposta_crua(self):
         payload_p0 = [{"NC": "cab"}, {"NC": "1", "V": "10"}]
         payload_p1 = [{"NC": "cab"}, {"NC": "1", "V": "20"}]
         client = self._make_client_with_responses([payload_p0, payload_p1])
-        agregado = self._make_agregado_2_periodos()
+        agregado = self._agregado_com_datas()
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            paths = client.download_dados_agregado(
+            res = client.download_dados_agregado(
                 agregado.id,
                 tmp_dir,
                 agregado=agregado,
                 limit=1,
                 max_workers=1,
+                hoje=dt.date(2026, 11, 19),
             )
-
-            self.assertEqual(len(paths), 1)
-            data_path = paths[0]
-            self.assertEqual(data_path.name, "dados_N1.ndjson")
-
-            linhas = [json.loads(linha) for linha in data_path.read_text().splitlines()]
-            self.assertEqual(linhas, [payload_p0[0], payload_p0[1], payload_p1[1]])
-
-            manifest_path = Path(str(data_path) + ".manifest.json")
-            self.assertTrue(manifest_path.exists())
-            manifest = json.loads(manifest_path.read_text())
-            self.assertEqual(manifest["source_id"], "sidra")
-            self.assertEqual(manifest["dataset_id"], f"{agregado.id}:N1")
-            self.assertEqual(manifest["size_bytes"], len(data_path.read_bytes()))
-
-            import hashlib
-
+            self.assertEqual(len(res.baixados), 2)
+            self.assertEqual(res.existentes, [])
+            nomes = sorted(p.name for p in res.baixados)
             self.assertEqual(
-                manifest["sha256"], hashlib.sha256(data_path.read_bytes()).hexdigest()
+                nomes,
+                [
+                    f"t-{agregado.id}_p-p0000_f-a_n1-all_v-all@20240305.json",
+                    f"t-{agregado.id}_p-p0001_f-a_n1-all_v-all@20240406.json",
+                ],
             )
+            for p in res.baixados:
+                self.assertEqual(p.parent.name, f"t-{agregado.id}")
+            por_nome = {p.name: p for p in res.baixados}
+            bruto0 = json.dumps(payload_p0, ensure_ascii=False).encode("utf-8")
+            self.assertEqual(por_nome[nomes[0]].read_bytes(), bruto0)
+
+            manifest = json.loads(
+                Path(str(por_nome[nomes[0]]) + ".manifest.json").read_text()
+            )
+            self.assertEqual(manifest["source_id"], "ibge-sidra")
+            self.assertEqual(manifest["dataset_id"], f"t-{agregado.id}")
+            self.assertEqual(manifest["size_bytes"], len(bruto0))
+            self.assertEqual(manifest["sha256"], hashlib.sha256(bruto0).hexdigest())
+            self.assertIn("/t/", manifest["url"])
+            self.assertIsNotNone(res.metadados)
+            self.assertEqual(res.metadados.name, "metadados@20261119.json")
+            self.assertEqual(list(Path(tmp_dir).rglob("*.ndjson")), [])
+
+    def test_segundo_download_pula_pedacos_e_nao_regrava_metadados(self):
+        payload = [{"NC": "cab"}, {"NC": "1", "V": "10"}]
+        client = self._make_client_with_responses([payload, payload])
+        agregado = self._agregado_com_datas()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            kw = dict(agregado=agregado, limit=1, max_workers=1)
+            client.download_dados_agregado(
+                agregado.id, tmp_dir, hoje=dt.date(2026, 11, 19), **kw
+            )
+            segundo = client.download_dados_agregado(
+                agregado.id, tmp_dir, hoje=dt.date(2026, 11, 20), **kw
+            )
+            self.assertEqual(segundo.baixados, [])
+            self.assertEqual(len(segundo.existentes), 2)
+            self.assertIsNone(segundo.metadados)
+            meta = sorted(Path(tmp_dir).rglob("metadados@*.json"))
+            meta = [m for m in meta if not m.name.endswith(".manifest.json")]
+            self.assertEqual([m.name for m in meta], ["metadados@20261119.json"])
+
+    def test_revisao_do_ibge_gera_arquivo_novo_sem_apagar_o_antigo(self):
+        payload = [{"NC": "cab"}, {"NC": "1", "V": "10"}]
+        client = self._make_client_with_responses([payload, payload, payload])
+        agregado = self._agregado_com_datas()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            kw = dict(agregado=agregado, limit=1, max_workers=1)
+            client.download_dados_agregado(agregado.id, tmp_dir, **kw)
+            agregado.periodos[0].modificacao = dt.date(2024, 9, 1)  # revisão
+            res = client.download_dados_agregado(agregado.id, tmp_dir, **kw)
+            antigo = f"t-{agregado.id}_p-p0000_f-a_n1-all_v-all@20240305.json"
+            novo = f"t-{agregado.id}_p-p0000_f-a_n1-all_v-all@20240901.json"
+            self.assertEqual([p.name for p in res.baixados], [novo])
+            pasta = Path(tmp_dir) / f"t-{agregado.id}"
+            dados = {
+                p.name
+                for p in pasta.glob("t-*.json")
+                if not p.name.endswith(".manifest.json")
+            }
+            self.assertEqual(len(dados), 3)
+            self.assertIn(antigo, dados)
+            self.assertIn(novo, dados)
 
 
 if __name__ == "__main__":
