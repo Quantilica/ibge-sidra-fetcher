@@ -7,11 +7,27 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Não lançado]
 
+## [0.13.0] - 2026-11-19
+
 ### Alterado
-- CI e infraestrutura alinhados ao template (fetcher-template v0.2.1).
+
+**Quebra de compatibilidade (BREAKING).** Layout do bruto por consulta (ADR 2026-11-19, `planning/decisions/2026-11-19-layout-bruto-ibge-sidra.md`).
+
+- **Sai o NDJSON mesclado** `agregados/<id>/dados_<nivel>.ndjson`. O download grava um arquivo por consulta ao `/values`, com a resposta crua do servidor (byte a byte), em `<raiz>/t-<id>/<consulta>@AAAAMMDD.json`, mais o sidecar `.manifest.json` (`dataset_id="t-<id>"`, URL, sha256). O miolo do nome é o caminho de `Parametro.url()` (`t`, `p`, `f`, `n...`, `v`, `c...`); `@AAAAMMDD` é a data de modificação do período (`@00010101` se a API não informa). Listas que estourariam 200 caracteres no nome viram `h` + 8 hex do sha256 da lista ordenada, com a lista completa em `metadata.parametros`.
+- Cada pedaço cobre sempre um período só (o plano divide por período mesmo quando a tabela caberia numa consulta).
+- `source_id` passa de `sidra` a `ibge-sidra` (storage, download, reader, plugin); a saída padrão passa de `/data/sidra` a `/data/ibge-sidra`.
+- `SidraClient.download_dados_agregado` e `download_agregado_dados` devolvem `DownloadResult` (`baixados`, `existentes`, `metadados`) em vez de `list[Path]`.
+- `check`: o frescor é a existência do arquivo com a data de modificação da API, sem mtime. Uma revisão do IBGE gera arquivo novo e o antigo não é apagado.
+- `DataRepository`: `path_dados(parametro, modificacao)` devolve o caminho por consulta; saem `path_agregado`, o `path_indice` antigo e o `path_for_entry` de "layout fixo".
 
 ### Adicionado
+- `t-<id>/metadados@AAAAMMDD.json` (data da coleta) e `indice_pesquisas@AAAAMMDD.json`, só regravados quando o sha256 muda (`DataRepository.write_metadados`/`write_indice`).
+- `SidraClient.get_bytes`; `storage.parse_nome_arquivo` (nome do arquivo para parâmetros, aceita os nomes do acervo `ibge-tabelas`) e `reader.iter_dados_tabela`/`listar_arquivos_tabela` (a mesclagem passa a ser etapa de leitura).
+- `sync --dry-run` lista os nomes de arquivo que serão gerados.
 - Testes: identidade do registro conferida.
+
+### Alterado (infra)
+- CI e infraestrutura alinhados ao template (fetcher-template v0.2.1).
 
 ### Corrigido
 - CI: o `uv sync` do workflow de testes deixa de passar `--index` e `--index-strategy` do índice Quantilica. O pacote não depende de nada que só exista no índice, e o GitHub Pages responde com 503 intermitente quando o caminho não existe, o que derrubava o job.
