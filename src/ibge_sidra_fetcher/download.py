@@ -21,18 +21,16 @@ Typical usage:
     >>> with SidraClient() as client:
     ...     chunks = client.plan_dados_agregado(1705)
     ...     resumo = describe_download_plan(chunks)
-    ...     paths = client.download_dados_agregado(1705, "./sidra_data")
+    ...     res = client.download_dados_agregado(1705, "./ibge-sidra")
 """
 
 from __future__ import annotations
 
 import contextlib
-import hashlib
+import datetime as dt
 import json
-import os
-import tempfile
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -40,10 +38,11 @@ from typing import TYPE_CHECKING, Any
 
 from quantilica.core.exceptions import FetchError
 from quantilica.core.http import RateLimiter
-from quantilica.core.manifests import DownloadManifest, write_manifest_sidecar
 
 from .agregados import Agregado
+from .reader import DateEncoder
 from .sidra import SIDRA_API_VALUES_LIMIT, Formato, Parametro, Precisao
+from .storage import DataRepository, nome_arquivo
 
 if TYPE_CHECKING:
     from .fetcher import SidraClient
@@ -400,7 +399,21 @@ def plan_agregado_download(
                 for cid, cats in classificacoes_pool.items()
             },
         )
-        for ctx in _split_context(ctx_inicial, pools, limit):
+        # Um pedaço cobre sempre um período só (ADR 2026-11-19, D3): o nome do
+        # arquivo carrega a data de modificação desse período, e um período
+        # novo ou revisado gera só os arquivos dele. Por isso a divisão por
+        # período é incondicional, mesmo quando a tabela inteira cabe no limite.
+        if len(periodos_pool) > 1:
+            ctxs = (
+                ctx
+                for periodo in periodos_pool
+                for ctx in _split_context(
+                    replace(ctx_inicial, periodos=[periodo]), pools, limit
+                )
+            )
+        else:
+            ctxs = _split_context(ctx_inicial, pools, limit)
+        for ctx in ctxs:
             parametro = _context_to_parametro(
                 agregado.id, nivel, ctx, formato, decimais
             )
@@ -465,85 +478,77 @@ def iter_download_chunks(
             time.sleep(politeness_delay)
 
 
-def _download_nivel(
+@dataclass(frozen=True)
+class DownloadResult:
+    """Resultado de :func:`download_agregado_dados`.
+
+    Attributes:
+        baixados: Arquivos de dados gravados nesta execução.
+        existentes: Arquivos que já existiam (pedaço em dia, pulado).
+        metadados: ``metadados@AAAAMMDD.json`` gravado agora, ou ``None`` se o
+            sha256 não mudou desde a última versão.
+    """
+
+    baixados: list[Path] = field(default_factory=list)
+    existentes: list[Path] = field(default_factory=list)
+    metadados: Path | None = None
+
+
+def modificacao_do_chunk(
+    chunk: DownloadChunk, modificacoes: Mapping[str, dt.date | None]
+) -> dt.date | None:
+    """Data de modificação de um pedaço: a maior dos períodos que ele cobre.
+
+    Cada pedaço costuma cobrir um período só (a divisão começa por período);
+    quando cobre vários (tabela pequena que cabe numa consulta), vale a maior
+    data, de modo que uma revisão de qualquer período gera arquivo novo.
+    ``None`` se a API não informou data para nenhum deles.
+    """
+    cobertos = chunk.parametro.periodos or list(modificacoes)
+    datas = [d for pid in cobertos if isinstance(d := modificacoes.get(pid), dt.date)]
+    return max(datas) if datas else None
+
+
+def nomes_do_plano(chunks: list[DownloadChunk], agregado: Agregado) -> list[str]:
+    """Nomes de arquivo (``<consulta>@AAAAMMDD.json``) que o plano vai gerar."""
+    modificacoes = {p.id: p.modificacao for p in agregado.periodos}
+    return [
+        nome_arquivo(c.parametro, modificacao_do_chunk(c, modificacoes))[0]
+        for c in chunks
+    ]
+
+
+def _baixar_chunk(
     client: SidraClient,
-    grupo: list[DownloadChunk],
-    target: Path,
+    repo: DataRepository,
+    chunk: DownloadChunk,
+    modificacao: dt.date | None,
     *,
-    agregado_id: int,
-    nivel: str,
-    max_workers: int,
-    politeness_delay: float,
-    on_chunk_done: Callable[[DownloadChunk], None] | None,
-    acquire_slot: Callable[[str], Any] | None = None,
+    limiter: RateLimiter,
+    acquire_slot: Callable[[str], Any] | None,
 ) -> Path:
-    """Baixa todos os chunks de um nível territorial e grava NDJSON + manifest."""
-    fd, raw_temp_path = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    """Baixa um pedaço e grava a resposta crua + sidecar."""
+    url = chunk.parametro.url()
+    ctx = (
+        acquire_slot(f"Nível {chunk.nivel_territorial}")
+        if acquire_slot
+        else contextlib.nullcontext()
     )
-    temp_path = Path(raw_temp_path)
-    digest = hashlib.sha256()
-    tamanho = 0
-    cabecalho_escrito = False
-    first_url = grupo[0].parametro.url()
-
-    def _escrever_linha(stream, valor: Any) -> None:
-        nonlocal tamanho
-        encoded = (json.dumps(valor, ensure_ascii=False) + "\n").encode("utf-8")
-        stream.write(encoded)
-        digest.update(encoded)
-        tamanho += len(encoded)
-
-    limiter = RateLimiter(politeness_delay)
-
-    def _fetch(chunk: DownloadChunk) -> list:
-        # O delay é aplicado aqui, dentro do worker, para não bloquear a
-        # thread principal — que assim consome/escreve continuamente em vez
-        # de acumular respostas completas na memória durante a submissão.
-        url = chunk.parametro.url()
-        if acquire_slot:
-            ctx = acquire_slot(f"Nível {nivel}")
-        else:
-            ctx = contextlib.nullcontext()
-        with ctx:
-            limiter.acquire()
-            return _validar_linhas(url, client.get(url))
-
+    with ctx:
+        limiter.acquire()
+        content = client.get_bytes(url)
     try:
-        with os.fdopen(fd, "wb") as stream:
-            futures: dict[Any, DownloadChunk] = {}
-            with graceful_executor(max_workers=max_workers) as executor:
-                futures = {executor.submit(_fetch, chunk): chunk for chunk in grupo}
-                for future in as_completed(futures):
-                    chunk = futures[future]
-                    linhas = future.result()
-                    if linhas:
-                        if not cabecalho_escrito:
-                            _escrever_linha(stream, linhas[0])
-                            cabecalho_escrito = True
-                        for linha in linhas[1:]:
-                            _escrever_linha(stream, linha)
-                    if on_chunk_done is not None:
-                        on_chunk_done(chunk)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temp_path.replace(target)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-    manifest = DownloadManifest.from_digest(
-        source_id="sidra",
-        dataset_id=f"{agregado_id}:{nivel}",
-        url=first_url,
-        sha256=digest.hexdigest(),
-        size_bytes=tamanho,
-        path=str(target.absolute()),
-        producer="ibge-sidra-fetcher",
-        metadata={"nivel_territorial": nivel, "n_requests": len(grupo)},
+        linhas = json.loads(content)
+    except ValueError as exc:
+        raise FetchError(f"Resposta do SIDRA não é JSON válido em {url}") from exc
+    _validar_linhas(url, linhas)
+    return repo.write_dados(
+        chunk.parametro,
+        modificacao,
+        content,
+        url=url,
+        nivel_territorial=chunk.nivel_territorial,
     )
-    write_manifest_sidecar(target, manifest)
-    return target
 
 
 def download_agregado_dados(
@@ -561,32 +566,32 @@ def download_agregado_dados(
     politeness_delay: float = 0.0,
     on_chunk_done: Callable[[DownloadChunk], None] | None = None,
     acquire_slot: Callable[[str], Any] | None = None,
-) -> list[Path]:
-    """Baixa todos os dados de um agregado e grava um NDJSON + manifest por
-    nível territorial.
+    hoje: dt.date | None = None,
+) -> DownloadResult:
+    """Baixa os dados de um agregado: um arquivo por consulta ao ``/values``.
 
-    Cada linha do arquivo NDJSON é um registro do SIDRA (a primeira linha é o
-    cabeçalho com os nomes amigáveis das colunas, mantido uma única vez mesmo
-    quando o download exige múltiplos requests). Grava atomicamente e produz
-    um ``DownloadManifest`` (SHA-256, tamanho, URL de origem) ao lado de cada
-    arquivo de dados, seguindo a mesma convenção de
-    :func:`ibge_sidra_fetcher.reader.save_agregado`.
+    Cada pedaço do plano vira ``<output_dir>/t-<id>/<consulta>@AAAAMMDD.json``
+    com a resposta crua do servidor (byte a byte, sem mesclar), gravada de forma
+    atômica, mais o sidecar ``.manifest.json`` (``source_id="ibge-sidra"``,
+    ``dataset_id="t-<id>"``, URL e sha256). Pedaços cujo arquivo já existe são
+    pulados: uma revisão do IBGE muda a data e gera arquivo novo, sem apagar o
+    antigo. Também grava ``metadados@AAAAMMDD.json`` (data da coleta) quando o
+    sha256 dos metadados mudou.
 
     Args:
-        client: Cliente já autenticado/configurado para fazer os requests.
+        client: Cliente já configurado para fazer os requests.
         agregado_id: ID do agregado a baixar.
-        output_dir: Diretório onde os arquivos ``dados_{nivel}.ndjson`` serão
-            gravados (criado se não existir).
-        agregado: Metadados já carregados, para evitar um round-trip extra
-            quando o chamador já os possui.
-        max_workers: Concorrência máxima de requests por nível territorial.
+        output_dir: Raiz do bruto (``t-<id>/`` é criado dentro dela).
+        agregado: Metadados já carregados, para evitar um round-trip extra.
+        max_workers: Concorrência máxima de requests.
         politeness_delay: Pausa (segundos) entre o disparo de cada request.
-        on_chunk_done: Callback opcional, chamado após cada chunk concluído
-            (útil para barras de progresso).
+        on_chunk_done: Callback após cada pedaço concluído ou pulado.
+        acquire_slot: Fábrica de contexto para limitar a concorrência por nível.
+        hoje: Data da coleta dos metadados (padrão: hoje).
 
     Returns:
-        Caminhos dos arquivos de dados gravados (não dos manifests), um por
-        nível territorial efetivamente baixado.
+        :class:`DownloadResult` com os arquivos gravados, os já existentes e o
+        arquivo de metadados novo (se houve).
     """
     if agregado is None:
         agregado = client.get_agregado(agregado_id)
@@ -600,29 +605,63 @@ def download_agregado_dados(
         limit=limit,
     )
 
-    grupos: dict[str, list[DownloadChunk]] = {}
+    repo = DataRepository(output_dir)
+    modificacoes = {p.id: p.modificacao for p in agregado.periodos}
+    hoje = hoje or dt.date.today()
+
+    conteudo_meta = json.dumps(
+        agregado.asdict(), ensure_ascii=False, indent=2, cls=DateEncoder
+    ).encode("utf-8")
+    metadados = repo.write_metadados(
+        agregado_id,
+        conteudo_meta,
+        hoje,
+        url=agregado.url
+        or f"https://servicodados.ibge.gov.br/api/v3/agregados/{agregado_id}",
+        metadata={"nome": agregado.nome, "pesquisa": agregado.pesquisa.nome},
+    )
+
+    resultado = DownloadResult(metadados=metadados)
+    pendentes: list[tuple[DownloadChunk, dt.date | None]] = []
     for chunk in chunks:
-        grupos.setdefault(chunk.nivel_territorial, []).append(chunk)
+        modificacao = modificacao_do_chunk(chunk, modificacoes)
+        alvo = repo.path_dados(chunk.parametro, modificacao)
+        if alvo.exists():
+            resultado.existentes.append(alvo)
+            sidecar = alvo.with_name(alvo.name + ".manifest.json")
+            if not sidecar.exists():  # queda entre o dado e o sidecar
+                _nome, hashes = nome_arquivo(chunk.parametro, modificacao)
+                repo.write_dados_manifest(
+                    alvo,
+                    chunk.parametro,
+                    modificacao,
+                    alvo.read_bytes(),
+                    url=chunk.parametro.url(),
+                    nivel_territorial=chunk.nivel_territorial,
+                    hashes=hashes,
+                )
+            if on_chunk_done is not None:
+                on_chunk_done(chunk)
+        else:
+            pendentes.append((chunk, modificacao))
 
-    output_path = Path(output_dir)
-    if output_path.name != str(agregado_id):
-        output_path = output_path / "agregados" / str(agregado_id)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    paths: list[Path] = []
-    for nivel, grupo in grupos.items():
-        target = output_path / f"dados_{nivel}.ndjson"
-        paths.append(
-            _download_nivel(
+    limiter = RateLimiter(politeness_delay)
+    with graceful_executor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _baixar_chunk,
                 client,
-                grupo,
-                target,
-                agregado_id=agregado_id,
-                nivel=nivel,
-                max_workers=max_workers,
-                politeness_delay=politeness_delay,
-                on_chunk_done=on_chunk_done,
+                repo,
+                chunk,
+                modificacao,
+                limiter=limiter,
                 acquire_slot=acquire_slot,
-            )
-        )
-    return paths
+            ): chunk
+            for chunk, modificacao in pendentes
+        }
+        for future in as_completed(futures):
+            resultado.baixados.append(future.result())
+            if on_chunk_done is not None:
+                on_chunk_done(futures[future])
+    resultado.baixados.sort()
+    return resultado

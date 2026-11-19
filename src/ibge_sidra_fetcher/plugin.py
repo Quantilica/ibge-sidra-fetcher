@@ -29,7 +29,7 @@ from rich.table import Table
 
 from ibge_sidra_fetcher.check import check_agregado
 from ibge_sidra_fetcher.cli import _parse_classificacoes, _parse_lista
-from ibge_sidra_fetcher.download import describe_download_plan
+from ibge_sidra_fetcher.download import describe_download_plan, nomes_do_plano
 from ibge_sidra_fetcher.fetcher import SidraClient
 
 
@@ -40,7 +40,7 @@ class SidraFetcherApp(FetcherApp):
         pass
 
 
-_DEFAULT_OUTPUT = Path("/data/sidra")
+_DEFAULT_OUTPUT = Path("/data/ibge-sidra")
 
 
 def sidra_list_datasets(group: str) -> list[dict]:
@@ -90,8 +90,8 @@ fetcher_app = SidraFetcherApp(
     list_datasets=sidra_list_datasets,
     path_builder=sidra_path_builder,
     default_output=_DEFAULT_OUTPUT,
-    # O lake continua em `sidra/`: o produto segue chamando-se SIDRA.
-    source_id="sidra",
+    # ADR 2026-11-19 (D1): os dados em disco acompanham o id canônico.
+    source_id="ibge-sidra",
     # API JSON sem HEAD/ETag confiável: sem sondagem remota (F3).
     freshness_policy=FreshnessPolicy.REMOTE_ONLY,
 )
@@ -429,6 +429,15 @@ def _run_sync(
         )
 
         if dry_run:
+            nomes = nomes_do_plano(chunks, agregado)
+            mostrar = nomes if verbose else nomes[:10]
+            console.print(f"Arquivos em {output / f't-{agregado.id}'}:")
+            for nome in mostrar:
+                console.print(f"  {escape(nome)}", highlight=False)
+            if len(mostrar) < len(nomes):
+                console.print(
+                    f"  ... (+{len(nomes) - len(mostrar)}; use --verbose para todos)"
+                )
             return
 
         batch_progress = make_batch_progress(console)
@@ -455,7 +464,7 @@ def _run_sync(
                 return pool.acquire(description=f"[cyan]{desc}[/cyan]")
 
             try:
-                paths = client.download_dados_agregado(
+                resultado = client.download_dados_agregado(
                     agregado_id,
                     output,
                     agregado=agregado,
@@ -472,8 +481,14 @@ def _run_sync(
                 console.print(f"[red]Erro no download:[/red] {escape(str(e))}")
                 raise typer.Exit(1) from None
 
-    for p in paths:
+    for p in resultado.baixados:
         console.print(f"[green]Gravado:[/green] {p}")
+    if resultado.metadados is not None:
+        console.print(f"[green]Metadados:[/green] {resultado.metadados}")
+    console.print(
+        f"{len(resultado.baixados)} arquivo(s) gravado(s), "
+        f"{len(resultado.existentes)} já existente(s) (pulados)."
+    )
 
 
 @app.command("check")

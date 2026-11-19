@@ -52,6 +52,7 @@ from .agregados import (
     Variavel,
 )
 from .periodos import parse_date, parse_period
+from .storage import ConsultaArquivo, listar_dados
 
 
 class DateEncoder(json.JSONEncoder):
@@ -582,8 +583,8 @@ def save_agregado(agregado: Agregado, path: str | Path) -> None:
 
     # Generate and save manifest
     manifest = DownloadManifest.from_content(
-        source_id="sidra",
-        dataset_id=str(agregado.id),
+        source_id="ibge-sidra",
+        dataset_id=f"t-{agregado.id}",
         url=agregado.url
         or f"https://servicodados.ibge.gov.br/api/v3/agregados/{agregado.id}",
         content=content,
@@ -654,3 +655,77 @@ def load_agregado(path: str | Path) -> Agregado:
         periodos=periodos,
         localidades=localidades,
     )
+
+
+# -----------------------------------------------------------------------------
+# DADOS (resposta crua do /values) ============================================
+# _____________________________________________________________________________
+def listar_arquivos_tabela(
+    root: str | Path,
+    agregado_id: int | str,
+    *,
+    nivel: str | None = None,
+    ultima_versao: bool = True,
+) -> list[ConsultaArquivo]:
+    """Lista os arquivos de dados de uma tabela em ``<root>/t-<id>/``.
+
+    Args:
+        root: Raiz do bruto (ex.: ``/data/ibge-sidra``).
+        agregado_id: ID da tabela.
+        nivel: Restringe a um nível territorial (``"N6"`` ou ``"6"``).
+        ultima_versao: Quando há várias versões da mesma consulta (revisões do
+            IBGE, ``@AAAAMMDD`` diferentes), mantém só a mais recente.
+            Com ``False`` devolve todas.
+
+    Returns:
+        Arquivos ordenados pelo nome.
+    """
+    arquivos = listar_dados(Path(root) / f"t-{agregado_id}")
+    if nivel is not None:
+        chave = nivel.removeprefix("N")
+        arquivos = [a for a in arquivos if chave in a.parametro.territorios]
+    if ultima_versao:
+        melhores: dict[str, ConsultaArquivo] = {}
+        for arq in arquivos:
+            atual = melhores.get(arq.stem)
+            if atual is None or arq.modificacao > atual.modificacao:
+                melhores[arq.stem] = arq
+        arquivos = [a for a in arquivos if melhores[a.stem] is a]
+    return arquivos
+
+
+def iter_dados_tabela(
+    root: str | Path,
+    agregado_id: int | str,
+    *,
+    nivel: str | None = None,
+    ultima_versao: bool = True,
+) -> Generator[dict[str, Any], None, None]:
+    """Lê os dados de uma tabela juntando os pedaços (mesclagem na leitura).
+
+    Cada arquivo guarda a resposta crua do servidor: uma lista cujo primeiro
+    item é o cabeçalho. O cabeçalho sai uma única vez (o do primeiro pedaço) e
+    as linhas dos demais pedaços vêm em seguida. Lê um arquivo por vez.
+
+    Args:
+        root: Raiz do bruto.
+        agregado_id: ID da tabela.
+        nivel: Restringe a um nível territorial (``"N6"`` ou ``"6"``).
+        ultima_versao: Usa só a versão mais recente de cada consulta.
+
+    Yields:
+        Registros do SIDRA (dicionários).
+    """
+    cabecalho_emitido = False
+    for arq in listar_arquivos_tabela(
+        root, agregado_id, nivel=nivel, ultima_versao=ultima_versao
+    ):
+        assert arq.path is not None
+        with arq.path.open("r", encoding="utf-8") as f:
+            linhas = json.load(f)
+        if not isinstance(linhas, list) or not linhas:
+            continue
+        if not cabecalho_emitido:
+            yield linhas[0]
+            cabecalho_emitido = True
+        yield from linhas[1:]

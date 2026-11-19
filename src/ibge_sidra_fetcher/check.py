@@ -3,22 +3,22 @@
 
 """Verificação de frescor (check) para agregados do SIDRA, sem download.
 
-Compara, por nível territorial, a data máxima de modificação dos períodos
-coberto pelo plano contra o mtime do NDJSON local (``dados_{nivel}.ndjson``).
+O frescor é por existência (ADR 2026-11-19, D6): um pedaço está em dia se o
+arquivo ``t-<id>/<consulta>@AAAAMMDD.json`` com a data de modificação da API
+já existe. Revisão do IBGE muda a data, logo o nome, e o pedaço volta a ser
+"a baixar". Não se compara mtime. O acervo histórico, que usa os mesmos nomes,
+conta como existente.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 from pathlib import Path
 from typing import Any
 
+from .download import modificacao_do_chunk
+from .storage import DataRepository, nome_arquivo
+
 __all__ = ["check_agregado"]
-
-
-def _max_modificacao(iso_dates: list[dt.date]) -> dt.date | None:
-    """Maior data de modificação, ou None se vazia."""
-    return max(iso_dates) if iso_dates else None
 
 
 def check_agregado(
@@ -34,7 +34,7 @@ def check_agregado(
     Args:
         client: Cliente com ``get_agregado`` e ``plan_dados_agregado``.
         agregado_id: ID do agregado.
-        output_dir: Diretório onde vivem os ``dados_{nivel}.ndjson``.
+        output_dir: Raiz do bruto (os arquivos vivem em ``t-<id>/``).
         filtros: Mesmos filtros de ``plan_dados_agregado``
             (``niveis_territoriais``, ``variaveis``, ``periodos``,
             ``classificacoes``).
@@ -47,66 +47,50 @@ def check_agregado(
     filtros = dict(filtros or {})
     agregado = client.get_agregado(agregado_id)
     chunks = client.plan_dados_agregado(agregado_id, agregado=agregado, **filtros)
-    output = Path(output_dir)
+    pasta = Path(output_dir) / DataRepository.dataset_id(agregado_id)
+    modificacoes = {p.id: p.modificacao for p in agregado.periodos}
 
-    mod_por_periodo = {p.id: p.modificacao for p in agregado.periodos}
-    pool_periodos = [p.id for p in agregado.periodos]
-
-    por_nivel: dict[str, set[str]] = {}
+    por_nivel: dict[str, list[tuple[Path, Any]]] = {}
     for chunk in chunks:
-        cobertos = chunk.parametro.periodos or pool_periodos
-        por_nivel.setdefault(chunk.nivel_territorial, set()).update(cobertos)
+        modificacao = modificacao_do_chunk(chunk, modificacoes)
+        nome, _hashes = nome_arquivo(chunk.parametro, modificacao)
+        por_nivel.setdefault(chunk.nivel_territorial, []).append(
+            (pasta / nome, modificacao)
+        )
 
     veredictos: list[dict[str, Any]] = []
     for nivel in sorted(por_nivel):
-        filename = f"dados_{nivel}.ndjson"
-        nested = output / "agregados" / str(agregado_id) / filename
-        flat = output / filename
-        if nested.exists():
-            target = nested
-        elif flat.exists():
-            target = flat
-        elif output.name == str(agregado_id):
-            target = flat
-        else:
-            target = nested
-        mods = [
-            mod_por_periodo[pid] for pid in por_nivel[nivel] if pid in mod_por_periodo
-        ]
-        max_mod = _max_modificacao(mods)
-        existe = target.exists()
-        if existe and max_mod is not None:
-            limite = (
-                dt.datetime(max_mod.year, max_mod.month, max_mod.day).timestamp() - 1
-            )
-            fresco = target.stat().st_mtime >= limite
-        else:
-            fresco = False
-        if fresco:
+        alvos = por_nivel[nivel]
+        presentes = sum(1 for caminho, _m in alvos if caminho.exists())
+        datas = [m for _c, m in alvos if m is not None]
+        max_mod = max(datas) if datas else None
+        if presentes == len(alvos):
             acao, motivo = "skip-up-to-date", "local-fresh"
         else:
             acao = "download"
-            motivo = "not-present" if not existe else "remote-newer"
+            motivo = "not-present" if presentes == 0 else "remote-newer"
+        dataset = DataRepository.dataset_id(agregado_id)
         veredictos.append(
             {
-                "dataset": f"sidra-{agregado_id}",
-                "id": filename,
+                "dataset": dataset,
+                "id": f"{dataset}:{nivel}",
                 "url": agregado.url,
                 "partition": nivel,
-                "local_path": str(target),
+                "local_path": str(pasta),
                 "remote_etag": None,
                 "remote_last_modified": max_mod.isoformat() if max_mod else None,
                 "remote_size": None,
-                "local_exists": existe,
+                "local_exists": presentes > 0,
                 "action": acao,
                 "reason": motivo,
                 "entry": {
-                    "id": filename,
+                    "id": f"{dataset}:{nivel}",
                     "url": agregado.url,
-                    "dataset": f"sidra-{agregado_id}",
+                    "dataset": dataset,
                     "agregado_id": agregado_id,
                     "nivel": nivel,
-                    "filename": filename,
+                    "n_arquivos": len(alvos),
+                    "n_presentes": presentes,
                     "filtros": filtros,
                 },
             }

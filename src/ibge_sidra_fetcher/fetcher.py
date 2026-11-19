@@ -45,6 +45,7 @@ from .agregados import (
 )
 from .download import (
     DownloadChunk,
+    DownloadResult,
     download_agregado_dados,
     iter_download_chunks,
     plan_agregado_download,
@@ -135,6 +136,27 @@ class SidraClient:
         """
         try:
             return self.client.get_json(url)
+        except HttpStatusError as exc:
+            raise _traduzir_erro_http(url, exc) from exc
+
+    def get_bytes(self, url: str) -> bytes:
+        """Fetch the raw response body (byte for byte) of the given URL.
+
+        Used by the data download, which stores the server response as is.
+
+        Args:
+            url (str): The URL to fetch.
+
+        Returns:
+            bytes: The response body, unparsed.
+
+        Raises:
+            SidraLimitError: If the API rejects the query for exceeding the
+                values-per-request limit (HTTP 400).
+            FetchError: For other HTTP error statuses, with the API message.
+        """
+        try:
+            return self.client.get_bytes(url)
         except HttpStatusError as exc:
             raise _traduzir_erro_http(url, exc) from exc
 
@@ -384,19 +406,22 @@ class SidraClient:
 
     def download_dados_agregado(
         self, agregado_id: int, output_dir: str | Path, **kwargs: Any
-    ) -> list[Path]:
-        """Download all data of an agregado to NDJSON + manifest files.
+    ) -> DownloadResult:
+        """Download the data of an agregado, one raw file per ``/values`` query.
 
-        See :func:`ibge_sidra_fetcher.download.download_agregado_dados` for the
+        Files go to ``<output_dir>/t-<id>/<consulta>@AAAAMMDD.json`` with a
+        ``.manifest.json`` sidecar each. See
+        :func:`ibge_sidra_fetcher.download.download_agregado_dados` for the
         accepted keyword arguments.
 
         Args:
             agregado_id (int): The ID of the aggregate.
-            output_dir (str | Path): The directory to save the downloaded files.
+            output_dir (str | Path): The raw root directory.
             **kwargs (Any): Additional keyword arguments.
 
         Returns:
-            list[Path]: A list of paths to the downloaded data files.
+            DownloadResult: Files written, files already present and the new
+            metadata file (if any).
         """
         return download_agregado_dados(self, agregado_id, output_dir, **kwargs)
 

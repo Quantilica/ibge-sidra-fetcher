@@ -23,7 +23,7 @@ except ImportError as exc:  # quantilica-core ausente ou instalação quebrada
     ) from exc
 
 from ibge_sidra_fetcher import __version__
-from ibge_sidra_fetcher.download import describe_download_plan
+from ibge_sidra_fetcher.download import describe_download_plan, nomes_do_plano
 from ibge_sidra_fetcher.fetcher import SidraClient
 
 
@@ -208,6 +208,14 @@ def handle_download(args: argparse.Namespace):
         )
 
         if args.dry_run:
+            nomes = nomes_do_plano(chunks, agregado)
+            mostrar = nomes if args.verbose else nomes[:10]
+            print()
+            print(f"Arquivos em {Path(args.output) / f't-{agregado.id}'}:")
+            for nome in mostrar:
+                print(f"  {nome}")
+            if len(mostrar) < len(nomes):
+                print(f"  ... (+{len(nomes) - len(mostrar)}; use --verbose para todos)")
             return
 
         from tqdm import tqdm
@@ -224,7 +232,7 @@ def handle_download(args: argparse.Namespace):
             level_pbars[nivel].update(1)
 
         try:
-            paths = client.download_dados_agregado(
+            resultado = client.download_dados_agregado(
                 agregado_id,
                 args.output,
                 agregado=agregado,
@@ -240,8 +248,14 @@ def handle_download(args: argparse.Namespace):
             for pbar in level_pbars.values():
                 pbar.close()
 
-    for p in paths:
+    for p in resultado.baixados:
         print(f"Gravado: {p}")
+    if resultado.metadados is not None:
+        print(f"Metadados: {resultado.metadados}")
+    print(
+        f"{len(resultado.baixados)} arquivo(s) gravado(s), "
+        f"{len(resultado.existentes)} já existente(s) (pulados)."
+    )
 
 
 def handle_check(args: argparse.Namespace):
@@ -375,7 +389,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     s_parser.add_argument("agregado_id", type=int, nargs="?", help="ID do agregado.")
     s_parser.add_argument(
-        "-o", "--output", default="/data/sidra", help="Diretório de saída."
+        "-o", "--output", default="/data/ibge-sidra", help="Diretório de saída."
     )
     _add_filtros(s_parser)
     s_parser.add_argument(
@@ -394,7 +408,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     d_parser.add_argument("agregado_id", type=int, nargs="?", help="ID do agregado.")
     d_parser.add_argument(
-        "-o", "--output", default="/data/sidra", help="Diretório de saída."
+        "-o", "--output", default="/data/ibge-sidra", help="Diretório de saída."
     )
     _add_filtros(d_parser)
     _add_execucao(d_parser)
@@ -406,7 +420,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     c_parser.add_argument("agregado_id", type=int, help="ID do agregado.")
     c_parser.add_argument(
-        "-o", "--output", default="/data/sidra", help="Diretório de saída."
+        "-o", "--output", default="/data/ibge-sidra", help="Diretório de saída."
     )
     _add_filtros(c_parser)
     c_parser.add_argument(
