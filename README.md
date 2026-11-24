@@ -13,12 +13,13 @@ Para a documentação completa, consulte [https://docs.quantilica.com](https://d
 ```
 <raiz>/t-<id>/t-<id>_p-<periodo>_f-<formato>_n<nivel>-<locs>_v-<vars>[_c<id>-<cats>...]@AAAAMMDD.json
 <raiz>/t-<id>/metadados@AAAAMMDD.json
+<raiz>/indice_pesquisas@AAAAMMDD.json
 ```
 
 - O miolo do nome é o caminho da URL do `/values` (`/<chave>/<valor>` vira `_<chave>-<valor>`).
 - `@AAAAMMDD` é a data de modificação do período no SIDRA (`@00010101` se a API não informa). Uma revisão do IBGE gera arquivo novo e o antigo fica.
 - Pedaços cujo arquivo já existe são pulados; o `check` usa a mesma regra (existência do arquivo com a data da API).
 - Listas longas (nome com mais de 200 caracteres) viram `h` + 8 hex do sha256 da lista ordenada; a lista completa fica em `metadata.parametros` do `.manifest.json`.
-- `metadados@AAAAMMDD.json` leva a data da coleta e só é regravado quando o sha256 muda.
+- `metadados@AAAAMMDD.json` e `indice_pesquisas@AAAAMMDD.json` levam a data da coleta e só são regravados quando o sha256 muda (o `sync` coleta os dois).
 - `source_id` e diretório de saída padrão: `ibge-sidra` (`/data/ibge-sidra`).
 - `reader.iter_dados_tabela(raiz, id)` junta os pedaços na leitura.
