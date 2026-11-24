@@ -5,7 +5,7 @@ Todas as mudanças notáveis deste projeto serão documentadas neste arquivo.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
-## [Não lançado]
+## [0.14.0] - 2026-11-24
 
 ### Adicionado
 - `sync` (e o alias `download`) também coleta o índice de pesquisas e grava `indice_pesquisas@AAAAMMDD.json` na raiz, só quando o sha256 mudou desde a última versão (`salvar_indice=True` em `download_agregado_dados`; função `salvar_indice_pesquisas`). A falha do índice gera aviso e não derruba o download. `DownloadResult.indice` traz o arquivo gravado.
