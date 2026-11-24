@@ -75,10 +75,10 @@ def test_lista_curta_nao_vira_hash() -> None:
     assert hashes == {}
 
 
-# nomes reais do acervo (data já sem hífens)
-ACERVO = [
+# nomes no layout por consulta (formas reais da API: allxp, allxt, vários n...)
+NOMES = [
     "t-1000_p-2003_f-a_n6-all_v-allxp_c81-allxt@20131030.json",
-    "t-1086_p-199701_f-a_n3-all_v-all_c12716-_c12529-@20091027.json",
+    "t-1086_p-199701_f-a_n3-all_v-all_c12716-all_c12529-all@20091027.json",
     "t-5_p-2010_f-a_n1-all_n2-all_n3-all_v-9_c1-2@20100101.json",
     "t-8_p-201201_f-a_n6-all_v-1,2,3,4@20120301.json",
     "t-9_p-199801,199802_f-c_n3-1,2_v-all@00010101.json",
@@ -86,20 +86,16 @@ ACERVO = [
 ]
 
 
-@pytest.mark.parametrize("nome", ACERVO)
+@pytest.mark.parametrize("nome", NOMES)
 def test_ida_e_volta_nome_parametros(nome: str) -> None:
     consulta = parse_nome_arquivo(nome)
     assert consulta is not None
-    # o c<id>- vazio do acervo equivale a "all"; o nome novo nunca o grava
-    esperado = nome.replace("c12716-_", "c12716-all_").replace(
-        "c12529-@", "c12529-all@"
-    )
     novo, _ = nome_arquivo(consulta.parametro, consulta.modificacao)
-    assert novo == esperado
+    assert novo == nome
 
 
-def test_parse_valores_do_acervo() -> None:
-    c = parse_nome_arquivo(ACERVO[0])
+def test_parse_valores_dos_nomes() -> None:
+    c = parse_nome_arquivo(NOMES[0])
     assert c is not None
     assert c.parametro.agregado == "1000"
     assert c.parametro.periodos == ["2003"]
@@ -108,23 +104,23 @@ def test_parse_valores_do_acervo() -> None:
     assert c.parametro.classificacoes == {"81": ["allxt"]}
     assert c.modificacao == dt.date(2013, 10, 30)
 
-    c = parse_nome_arquivo(ACERVO[1])
+    c = parse_nome_arquivo(NOMES[1])
     assert c is not None
     assert c.parametro.classificacoes == {"12716": [], "12529": []}
 
-    c = parse_nome_arquivo(ACERVO[2])
+    c = parse_nome_arquivo(NOMES[2])
     assert c is not None
     assert list(c.parametro.territorios) == ["1", "2", "3"]
 
-    c = parse_nome_arquivo(ACERVO[4])
+    c = parse_nome_arquivo(NOMES[4])
     assert c is not None
     assert c.parametro.formato is Formato.C
     assert c.parametro.periodos == ["199801", "199802"]
     assert c.modificacao == dt.date(1, 1, 1)
 
 
-def test_parse_aceita_data_legada_com_hifens_e_marca_hash() -> None:
-    c = parse_nome_arquivo("t-1_p-2003_f-a_n6-hdeadbeef_v-all@2013-10-30.json")
+def test_parse_marca_token_de_hash() -> None:
+    c = parse_nome_arquivo("t-1_p-2003_f-a_n6-hdeadbeef_v-all@20131030.json")
     assert c is not None
     assert c.modificacao == dt.date(2013, 10, 30)
     assert c.hashes == ("n6",)
@@ -132,7 +128,15 @@ def test_parse_aceita_data_legada_com_hifens_e_marca_hash() -> None:
 
 @pytest.mark.parametrize(
     "nome",
-    ["metadados@20260101.json", "lixo.json", "t-1_p-2@20260101.json", "x@1.json"],
+    [
+        "metadados@20260101.json",
+        "lixo.json",
+        "t-1_p-2@20260101.json",
+        "x@1.json",
+        # formas do layout antigo, que o fetcher não gera nem lê mais
+        "t-1_p-2003_f-a_n6-all_v-all@2013-10-30.json",
+        "t-1086_p-199701_f-a_n3-all_v-all_c12716-_c12529-@20091027.json",
+    ],
 )
 def test_parse_rejeita_o_que_nao_e_dado(nome: str) -> None:
     assert parse_nome_arquivo(nome) is None

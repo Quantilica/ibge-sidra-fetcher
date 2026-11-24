@@ -472,6 +472,7 @@ def _run_sync(
                     politeness_delay=delay,
                     on_chunk_done=on_chunk_done,
                     acquire_slot=acquire_slot,
+                    salvar_indice=True,
                     **filtros,
                 )
             except KeyboardInterrupt:
@@ -485,6 +486,8 @@ def _run_sync(
         console.print(f"[green]Gravado:[/green] {p}")
     if resultado.metadados is not None:
         console.print(f"[green]Metadados:[/green] {resultado.metadados}")
+    if resultado.indice is not None:
+        console.print(f"[green]Índice de pesquisas:[/green] {resultado.indice}")
     console.print(
         f"{len(resultado.baixados)} arquivo(s) gravado(s), "
         f"{len(resultado.existentes)} já existente(s) (pulados)."

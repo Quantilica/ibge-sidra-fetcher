@@ -6,8 +6,7 @@
 O frescor é por existência (ADR 2026-11-19, D6): um pedaço está em dia se o
 arquivo ``t-<id>/<consulta>@AAAAMMDD.json`` com a data de modificação da API
 já existe. Revisão do IBGE muda a data, logo o nome, e o pedaço volta a ser
-"a baixar". Não se compara mtime. O acervo histórico, que usa os mesmos nomes,
-conta como existente.
+"a baixar". Não se compara mtime.
 """
 
 from __future__ import annotations

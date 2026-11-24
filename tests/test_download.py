@@ -578,6 +578,80 @@ class TestClientDownload(unittest.TestCase):
             self.assertIn(antigo, dados)
             self.assertIn(novo, dados)
 
+    def test_indice_de_pesquisas_gravado_so_quando_o_sha_muda(self):
+        payload = [{"NC": "cab"}, {"NC": "1", "V": "10"}]
+        indice = [{"id": "AA", "nome": "Pesquisa", "agregados": []}]
+        indice_novo = indice + [{"id": "BB", "nome": "Outra", "agregados": []}]
+        # 1ª coleta: índice + 2 pedaços; 2ª: só o índice (pedaços pulados);
+        # 3ª: índice alterado.
+        client = self._make_client_with_responses(
+            [indice, payload, payload, indice, indice_novo]
+        )
+        agregado = self._agregado_com_datas()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            kw = dict(agregado=agregado, limit=1, max_workers=1, salvar_indice=True)
+            a = client.download_dados_agregado(
+                agregado.id, tmp_dir, hoje=dt.date(2026, 11, 19), **kw
+            )
+            self.assertIsNotNone(a.indice)
+            self.assertEqual(a.indice.name, "indice_pesquisas@20261119.json")
+            self.assertEqual(a.indice.parent, Path(tmp_dir))
+            self.assertEqual(json.loads(a.indice.read_text()), indice)
+            sidecar = json.loads(Path(str(a.indice) + ".manifest.json").read_text())
+            self.assertEqual(sidecar["source_id"], "ibge-sidra")
+            self.assertEqual(sidecar["dataset_id"], "indice_pesquisas")
+
+            b = client.download_dados_agregado(
+                agregado.id, tmp_dir, hoje=dt.date(2026, 11, 20), **kw
+            )
+            self.assertIsNone(b.indice)  # mesmo sha256: não regrava
+
+            c = client.download_dados_agregado(
+                agregado.id, tmp_dir, hoje=dt.date(2026, 11, 21), **kw
+            )
+            self.assertEqual(c.indice.name, "indice_pesquisas@20261121.json")
+            self.assertTrue(a.indice.exists())  # a versão antiga fica
+            versoes = [
+                p.name
+                for p in Path(tmp_dir).glob("indice_pesquisas@*.json")
+                if not p.name.endswith(".manifest.json")
+            ]
+            self.assertEqual(
+                sorted(versoes),
+                ["indice_pesquisas@20261119.json", "indice_pesquisas@20261121.json"],
+            )
+
+    def test_indice_nao_e_coletado_por_padrao(self):
+        payload = [{"NC": "cab"}, {"NC": "1", "V": "10"}]
+        client = self._make_client_with_responses([payload, payload])
+        agregado = self._agregado_com_datas()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            res = client.download_dados_agregado(
+                agregado.id, tmp_dir, agregado=agregado, limit=1, max_workers=1
+            )
+            self.assertIsNone(res.indice)
+            self.assertEqual(list(Path(tmp_dir).glob("indice_pesquisas@*")), [])
+
+    def test_falha_do_indice_nao_derruba_o_download(self):
+        payload = [{"NC": "cab"}, {"NC": "1", "V": "10"}]
+        # o índice devolve um dict (corpo de erro com HTTP 200)
+        client = self._make_client_with_responses(
+            [{"status": 500, "message": "erro"}, payload, payload]
+        )
+        agregado = self._agregado_com_datas()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            res = client.download_dados_agregado(
+                agregado.id,
+                tmp_dir,
+                agregado=agregado,
+                limit=1,
+                max_workers=1,
+                salvar_indice=True,
+            )
+            self.assertIsNone(res.indice)
+            self.assertEqual(len(res.baixados), 2)
+            self.assertEqual(list(Path(tmp_dir).glob("indice_pesquisas@*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

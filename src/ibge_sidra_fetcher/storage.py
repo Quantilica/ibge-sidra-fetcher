@@ -38,7 +38,7 @@ PRODUCER = "ibge-sidra-fetcher"
 MAX_NOME = 200
 SEM_MODIFICACAO = dt.date(1, 1, 1)
 
-_RE_DATA = re.compile(r"^(?P<stem>.+)@(?P<data>\d{8}|\d{4}-\d{2}-\d{2})\.json$")
+_RE_DATA = re.compile(r"^(?P<stem>.+)@(?P<data>\d{8})\.json$")
 _RE_CHAVE = re.compile(r"^(t|p|f|v|n\d+|c\d+)$")
 _RE_HASH = re.compile(r"^h[0-9a-f]{8}$")
 
@@ -51,9 +51,8 @@ def stamp_data(data: dt.date | None) -> str:
 
 
 def parse_data(texto: str) -> dt.date:
-    """Converte ``AAAAMMDD`` (ou o legado ``AAAA-MM-DD``) em data."""
-    limpo = texto.replace("-", "")
-    return dt.date(int(limpo[:4]), int(limpo[4:6]), int(limpo[6:8]))
+    """Converte ``AAAAMMDD`` em data."""
+    return dt.date(int(texto[:4]), int(texto[4:6]), int(texto[6:8]))
 
 
 def hash_lista(valores: Iterable[str]) -> str:
@@ -132,7 +131,7 @@ class ConsultaArquivo:
     """Resultado de :func:`parse_nome_arquivo`.
 
     Attributes:
-        parametro: Parâmetros da consulta. Lista vazia equivale a ``all``.
+        parametro: Parâmetros da consulta. ``all`` vira lista vazia.
             Um token ``h<hash>`` fica como lista de um item (o próprio token)
             e é listado em ``hashes``.
         modificacao: Data do sufixo ``@AAAAMMDD``.
@@ -153,9 +152,9 @@ class ConsultaArquivo:
 def parse_nome_arquivo(nome: str) -> ConsultaArquivo | None:
     """Converte o nome de um arquivo de dados em parâmetros (inverso do nome).
 
-    Aceita os nomes do acervo: vários ``n`` no mesmo nome, ``c<id>-`` vazio,
-    listas de variáveis, formato ``c`` e a data ``@AAAA-MM-DD`` legada.
-    Devolve ``None`` quando o nome não é de um arquivo de dados.
+    Aceita vários ``n`` no mesmo nome, listas de variáveis, o formato ``c`` e
+    tokens ``h<hash>``. Devolve ``None`` quando o nome não é de um arquivo de
+    dados (inclusive ``c<id>-`` sem valor e data fora de ``@AAAAMMDD``).
     """
     m = _RE_DATA.match(Path(nome).name)
     if not m:
@@ -175,7 +174,9 @@ def parse_nome_arquivo(nome: str) -> ConsultaArquivo | None:
         chave, sep, valor = token.partition("-")
         if not sep or not _RE_CHAVE.match(chave):
             return None
-        lista = [] if valor in ("", "all") else valor.split(",")
+        if not valor:
+            return None
+        lista = [] if valor == "all" else valor.split(",")
         if len(lista) == 1 and _RE_HASH.match(lista[0]):
             hashes.append(chave)
         if chave == "t":

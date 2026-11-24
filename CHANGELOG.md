@@ -7,6 +7,12 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Não lançado]
 
+### Adicionado
+- `sync` (e o alias `download`) também coleta o índice de pesquisas e grava `indice_pesquisas@AAAAMMDD.json` na raiz, só quando o sha256 mudou desde a última versão (`salvar_indice=True` em `download_agregado_dados`; função `salvar_indice_pesquisas`). A falha do índice gera aviso e não derruba o download. `DownloadResult.indice` traz o arquivo gravado.
+
+### Alterado
+- `parse_nome_arquivo` aceita só a data `@AAAAMMDD` e recusa `c<id>-` sem valor: saem as formas do layout antigo, que o fetcher nunca gerou nesta versão.
+
 ## [0.13.0] - 2026-11-19
 
 ### Alterado

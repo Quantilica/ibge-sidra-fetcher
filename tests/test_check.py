@@ -206,6 +206,17 @@ def test_sync_from_plan_restringe_niveis(monkeypatch, tmp_path: Path) -> None:
     assert net.download_kwargs.get("niveis_territoriais") == ["N3"]
 
 
+def test_sync_liga_a_coleta_do_indice_de_pesquisas(monkeypatch, tmp_path: Path) -> None:
+    """O comando de coleta (`sync`) pede o `indice_pesquisas@AAAAMMDD.json`."""
+    import ibge_sidra_fetcher.plugin as plugin_module
+
+    net = _NoNetClient(_client_2niveis())
+    monkeypatch.setattr(plugin_module, "SidraClient", lambda *a, **k: net)
+    result = runner.invoke(app, ["sync", "1705", "-o", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert net.download_kwargs.get("salvar_indice") is True
+
+
 def test_sync_from_plan_rejeita_filtros_combinados(monkeypatch, tmp_path: Path) -> None:
     """--from-plan com filtros explícitos aborta com erro claro."""
     import ibge_sidra_fetcher.plugin as plugin_module

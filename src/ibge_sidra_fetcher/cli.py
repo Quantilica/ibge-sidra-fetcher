@@ -239,6 +239,7 @@ def handle_download(args: argparse.Namespace):
                 max_workers=args.workers,
                 politeness_delay=args.delay,
                 on_chunk_done=on_chunk_done,
+                salvar_indice=True,
                 **filtros,
             )
         except FetchError as e:
@@ -252,6 +253,8 @@ def handle_download(args: argparse.Namespace):
         print(f"Gravado: {p}")
     if resultado.metadados is not None:
         print(f"Metadados: {resultado.metadados}")
+    if resultado.indice is not None:
+        print(f"Índice de pesquisas: {resultado.indice}")
     print(
         f"{len(resultado.baixados)} arquivo(s) gravado(s), "
         f"{len(resultado.existentes)} já existente(s) (pulados)."

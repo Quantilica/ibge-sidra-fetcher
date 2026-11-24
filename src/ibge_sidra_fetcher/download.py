@@ -39,7 +39,8 @@ from typing import TYPE_CHECKING, Any
 from quantilica.core.exceptions import FetchError
 from quantilica.core.http import RateLimiter
 
-from .agregados import Agregado
+from . import logger
+from .agregados import Agregado, build_url_agregados
 from .reader import DateEncoder
 from .sidra import SIDRA_API_VALUES_LIMIT, Formato, Parametro, Precisao
 from .storage import DataRepository, nome_arquivo
@@ -487,11 +488,49 @@ class DownloadResult:
         existentes: Arquivos que já existiam (pedaço em dia, pulado).
         metadados: ``metadados@AAAAMMDD.json`` gravado agora, ou ``None`` se o
             sha256 não mudou desde a última versão.
+        indice: ``indice_pesquisas@AAAAMMDD.json`` gravado agora, ou ``None``
+            se o sha256 não mudou, se a coleta do índice não foi pedida ou se
+            ela falhou (o índice é auxiliar e não derruba o download).
     """
 
     baixados: list[Path] = field(default_factory=list)
     existentes: list[Path] = field(default_factory=list)
     metadados: Path | None = None
+    indice: Path | None = None
+
+
+def salvar_indice_pesquisas(
+    client: SidraClient,
+    output_dir: str | Path,
+    *,
+    hoje: dt.date | None = None,
+) -> Path | None:
+    """Grava ``<output_dir>/indice_pesquisas@AAAAMMDD.json`` se o sha256 mudou.
+
+    Baixa o índice de pesquisas e agregados (``/api/v3/agregados``) e compara
+    com a versão mais recente em disco (ADR 2026-11-19, D5).
+
+    Returns:
+        Caminho gravado, ou ``None`` quando o conteúdo é igual ao da última
+        versão.
+
+    Raises:
+        FetchError: Se a API falha ou não devolve uma lista JSON.
+    """
+    url = build_url_agregados()
+    content = client.get_bytes(url)
+    try:
+        pesquisas = json.loads(content)
+    except ValueError as exc:
+        raise FetchError(f"Resposta do SIDRA não é JSON válido em {url}") from exc
+    if not isinstance(pesquisas, list):
+        raise FetchError(f"Índice de pesquisas inesperado em {url}")
+    return DataRepository(output_dir).write_indice(
+        content,
+        hoje or dt.date.today(),
+        url=url,
+        metadata={"n_pesquisas": len(pesquisas)},
+    )
 
 
 def modificacao_do_chunk(
@@ -567,6 +606,7 @@ def download_agregado_dados(
     on_chunk_done: Callable[[DownloadChunk], None] | None = None,
     acquire_slot: Callable[[str], Any] | None = None,
     hoje: dt.date | None = None,
+    salvar_indice: bool = False,
 ) -> DownloadResult:
     """Baixa os dados de um agregado: um arquivo por consulta ao ``/values``.
 
@@ -576,7 +616,8 @@ def download_agregado_dados(
     ``dataset_id="t-<id>"``, URL e sha256). Pedaços cujo arquivo já existe são
     pulados: uma revisão do IBGE muda a data e gera arquivo novo, sem apagar o
     antigo. Também grava ``metadados@AAAAMMDD.json`` (data da coleta) quando o
-    sha256 dos metadados mudou.
+    sha256 dos metadados mudou e, com ``salvar_indice``, o
+    ``indice_pesquisas@AAAAMMDD.json`` da raiz quando o sha256 do índice mudou.
 
     Args:
         client: Cliente já configurado para fazer os requests.
@@ -587,7 +628,9 @@ def download_agregado_dados(
         politeness_delay: Pausa (segundos) entre o disparo de cada request.
         on_chunk_done: Callback após cada pedaço concluído ou pulado.
         acquire_slot: Fábrica de contexto para limitar a concorrência por nível.
-        hoje: Data da coleta dos metadados (padrão: hoje).
+        hoje: Data da coleta dos metadados e do índice (padrão: hoje).
+        salvar_indice: Também coleta o índice de pesquisas (uma requisição a
+            mais). Os comandos ``sync`` ligam; a falha do índice só gera aviso.
 
     Returns:
         :class:`DownloadResult` com os arquivos gravados, os já existentes e o
@@ -621,7 +664,14 @@ def download_agregado_dados(
         metadata={"nome": agregado.nome, "pesquisa": agregado.pesquisa.nome},
     )
 
-    resultado = DownloadResult(metadados=metadados)
+    indice: Path | None = None
+    if salvar_indice:
+        try:
+            indice = salvar_indice_pesquisas(client, output_dir, hoje=hoje)
+        except FetchError as exc:
+            logger.warning("Índice de pesquisas não coletado: %s", exc)
+
+    resultado = DownloadResult(metadados=metadados, indice=indice)
     pendentes: list[tuple[DownloadChunk, dt.date | None]] = []
     for chunk in chunks:
         modificacao = modificacao_do_chunk(chunk, modificacoes)
