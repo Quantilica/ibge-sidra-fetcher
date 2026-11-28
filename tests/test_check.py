@@ -396,7 +396,7 @@ def test_sync_from_plan_mesmo_agregado_com_filtros_diferentes_vira_dois_pedidos(
     ]
 
 
-def test_sync_from_plan_falha_de_um_agregado_nao_impede_os_outros_mas_sai_1(
+def test_sync_from_plan_falha_de_um_agregado_nao_impede_os_outros_e_sai_3(
     monkeypatch, tmp_path: Path
 ) -> None:
     import ibge_sidra_fetcher.plugin as plugin_module
@@ -409,10 +409,28 @@ def test_sync_from_plan_falha_de_um_agregado_nao_impede_os_outros_mas_sai_1(
         app, ["sync", "-o", str(tmp_path), "--from-plan", str(plano)]
     )
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3  # parcial: um baixou, outro falhou
     assert [a for a, _ in net.downloads] == [7060]
     assert "1 de 2 pedido(s)" in result.output
     assert "1705" in result.output
+
+
+def test_sync_from_plan_todos_os_agregados_falham_sai_1(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import ibge_sidra_fetcher.plugin as plugin_module
+
+    net = _MultiClient(falha_em={1705, 7060})
+    monkeypatch.setattr(plugin_module, "SidraClient", lambda *a, **k: net)
+    plano = _plano(tmp_path, [_item(1705, "N1"), _item(7060, "N1")])
+
+    result = runner.invoke(
+        app, ["sync", "-o", str(tmp_path), "--from-plan", str(plano)]
+    )
+
+    assert result.exit_code == 1
+    assert net.downloads == []
+    assert "2 de 2 pedido(s)" in result.output
 
 
 def test_sync_from_plan_agregado_invalido_aborta(monkeypatch, tmp_path: Path) -> None:
@@ -445,5 +463,5 @@ def test_cli_argparse_from_plan_com_agregados_diferentes(
     with pytest.raises(SystemExit) as info:
         cli.main(["sync", "-o", str(tmp_path), "--from-plan", str(plano)])
 
-    assert info.value.code == 1
-    assert [a for a, _ in net.downloads] == [1705]  # o outro falhou, saída 1
+    assert info.value.code == 3  # parcial: 1705 baixou, 7060 falhou
+    assert [a for a, _ in net.downloads] == [1705]

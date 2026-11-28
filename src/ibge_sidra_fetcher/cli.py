@@ -178,7 +178,8 @@ def handle_download(args: argparse.Namespace):
             "(agregado e filtros)."
         )
         # Cada agregado do plano é baixado; uma falha não impede os demais, mas o
-        # comando termina com erro.
+        # comando termina com erro: 3 se algum pedido deu certo (parcial), 1 se
+        # todos falharam (contrato do sync do host).
         falhas: list[int] = []
         for ag_id, filtros_plano, niveis_plano in pedidos:
             if len(pedidos) > 1:
@@ -195,7 +196,7 @@ def handle_download(args: argparse.Namespace):
                 f"falharam (agregados: {', '.join(map(str, falhas))}).",
                 file=sys.stderr,
             )
-            sys.exit(1)
+            sys.exit(3 if len(falhas) < len(pedidos) else 1)
         return
 
     if args.agregado_id is None:

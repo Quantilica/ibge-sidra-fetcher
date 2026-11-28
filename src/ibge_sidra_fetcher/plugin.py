@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from quantilica.cli.sdk import CheckPlan, CheckPlanItem, FetcherApp
+from quantilica.cli.sdk import EXIT_SYNC_PARTIAL, CheckPlan, CheckPlanItem, FetcherApp
 from quantilica.cli.ui import (
     ProgressPool,
     get_console,
@@ -388,7 +388,8 @@ def _run_sync(
             f"(agregado e filtros).[/dim]"
         )
         # Cada agregado do plano é baixado; uma falha não impede os demais, mas o
-        # comando termina com erro.
+        # comando termina com erro: 3 se algum pedido deu certo (parcial), 1 se
+        # todos falharam (contrato do sync do host).
         falhas: list[int] = []
         for ag_id, filtros_plano, niveis_plano in pedidos:
             if len(pedidos) > 1:
@@ -411,7 +412,7 @@ def _run_sync(
                 f"[red]Erro:[/red] {len(falhas)} de {len(pedidos)} pedido(s) do "
                 f"plano falharam (agregados: {', '.join(map(str, falhas))})."
             )
-            raise typer.Exit(1)
+            raise typer.Exit(EXIT_SYNC_PARTIAL if len(falhas) < len(pedidos) else 1)
         return
 
     if agregado_id is None:

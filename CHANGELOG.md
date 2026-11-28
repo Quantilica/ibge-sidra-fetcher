@@ -8,7 +8,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ## [Não lançado]
 
 ### Corrigido
-- `sync --from-plan` (plugin e `ibge-sidra-fetcher sync`) processa todos os agregados do plano, não só o primeiro item com ação `download`. Antes, um plano com agregados diferentes baixava só o primeiro, sem aviso. Os itens são agrupados por agregado e filtros (`check.agrupar_plano`), cada grupo vira um pedido de download com os níveis dele, e a saída informa quantos pedidos o plano gerou. Uma falha num agregado não impede os demais, e o comando sai 1 no fim, dizendo quais falharam. Plano de um agregado só (o que o `check` gera) se comporta como antes.
+- `sync --from-plan` (plugin e `ibge-sidra-fetcher sync`) processa todos os agregados do plano, não só o primeiro item com ação `download`. Antes, um plano com agregados diferentes baixava só o primeiro, sem aviso. Os itens são agrupados por agregado e filtros (`check.agrupar_plano`), cada grupo vira um pedido de download com os níveis dele, e a saída informa quantos pedidos o plano gerou. Uma falha num agregado não impede os demais, e o comando termina com erro dizendo quais falharam: sai 3 se algum pedido deu certo (parcial) e 1 se todos falharam, como o `sync` do host. Plano de um agregado só (o que o `check` gera) se comporta como antes.
 
 ## [0.14.0] - 2026-11-24
 
