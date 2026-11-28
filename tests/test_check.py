@@ -273,3 +273,177 @@ def test_check_json_tem_ids_completos(monkeypatch, tmp_path: Path) -> None:
         "t-1705:N1",
         "t-1705:N3",
     ]
+
+
+class _MultiClient:
+    """SidraClient fake de vários agregados; registra os downloads pedidos."""
+
+    def __init__(self, falha_em: set[int] | None = None) -> None:
+        self.downloads: list[tuple[int, dict]] = []
+        self._falha_em = falha_em or set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def get_agregado(self, agregado_id: int):
+        return SimpleNamespace(
+            id=agregado_id, nome=f"Agregado {agregado_id}", url="https://fake"
+        )
+
+    def plan_dados_agregado(self, agregado_id: int, agregado=None, **filtros):
+        return [_chunk("N1", "202301")]
+
+    def download_dados_agregado(self, agregado_id: int, output, **kwargs):
+        from quantilica.core.exceptions import FetchError
+
+        if agregado_id in self._falha_em:
+            raise FetchError(f"agregado {agregado_id} fora do ar")
+        self.downloads.append((agregado_id, kwargs))
+        return DownloadResult()
+
+
+def _item(agregado_id: int, nivel: str, filtros: dict | None = None) -> dict:
+    return {
+        "dataset": f"t-{agregado_id}",
+        "id": f"t-{agregado_id}:{nivel}",
+        "url": "https://fake",
+        "partition": nivel,
+        "local_path": "/x",
+        "remote_etag": None,
+        "remote_last_modified": None,
+        "remote_size": None,
+        "local_exists": False,
+        "action": "download",
+        "reason": "not-present",
+        "entry": {
+            "id": f"t-{agregado_id}:{nivel}",
+            "url": "https://fake",
+            "dataset": f"t-{agregado_id}",
+            "agregado_id": agregado_id,
+            "nivel": nivel,
+            "n_arquivos": 1,
+            "n_presentes": 0,
+            "filtros": filtros or {},
+        },
+    }
+
+
+def _plano(tmp_path: Path, itens: list[dict]) -> Path:
+    arq = tmp_path / "plan.json"
+    arq.write_text(
+        json.dumps(
+            {
+                "fetcher": "ibge-sidra-fetcher",
+                "output_dir": str(tmp_path),
+                "generated_at": "2026-11-28T00:00:00+00:00",
+                "items": itens,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return arq
+
+
+def test_sync_from_plan_com_agregados_diferentes_baixa_cada_um(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import ibge_sidra_fetcher.plugin as plugin_module
+
+    net = _MultiClient()
+    monkeypatch.setattr(plugin_module, "SidraClient", lambda *a, **k: net)
+    plano = _plano(
+        tmp_path,
+        [_item(1705, "N1"), _item(1705, "N3"), _item(7060, "N1"), _item(7060, "N6")],
+    )
+
+    result = runner.invoke(
+        app, ["sync", "-o", str(tmp_path), "--from-plan", str(plano)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [(a, k["niveis_territoriais"]) for a, k in net.downloads] == [
+        (1705, ["N1", "N3"]),
+        (7060, ["N1", "N6"]),
+    ]
+
+
+def test_sync_from_plan_mesmo_agregado_com_filtros_diferentes_vira_dois_pedidos(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import ibge_sidra_fetcher.plugin as plugin_module
+
+    net = _MultiClient()
+    monkeypatch.setattr(plugin_module, "SidraClient", lambda *a, **k: net)
+    plano = _plano(
+        tmp_path,
+        [
+            _item(1705, "N1", {"periodos": ["202301"]}),
+            _item(1705, "N3", {"periodos": ["202302"]}),
+        ],
+    )
+
+    result = runner.invoke(
+        app, ["sync", "-o", str(tmp_path), "--from-plan", str(plano)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [(a, k["periodos"], k["niveis_territoriais"]) for a, k in net.downloads] == [
+        (1705, ["202301"], ["N1"]),
+        (1705, ["202302"], ["N3"]),
+    ]
+
+
+def test_sync_from_plan_falha_de_um_agregado_nao_impede_os_outros_mas_sai_1(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import ibge_sidra_fetcher.plugin as plugin_module
+
+    net = _MultiClient(falha_em={1705})
+    monkeypatch.setattr(plugin_module, "SidraClient", lambda *a, **k: net)
+    plano = _plano(tmp_path, [_item(1705, "N1"), _item(7060, "N1")])
+
+    result = runner.invoke(
+        app, ["sync", "-o", str(tmp_path), "--from-plan", str(plano)]
+    )
+
+    assert result.exit_code == 1
+    assert [a for a, _ in net.downloads] == [7060]
+    assert "1 de 2 pedido(s)" in result.output
+    assert "1705" in result.output
+
+
+def test_sync_from_plan_agregado_invalido_aborta(monkeypatch, tmp_path: Path) -> None:
+    import ibge_sidra_fetcher.plugin as plugin_module
+
+    net = _MultiClient()
+    monkeypatch.setattr(plugin_module, "SidraClient", lambda *a, **k: net)
+    plano = _plano(tmp_path, [_item(1705, "N1"), _item("abc", "N1")])  # type: ignore[arg-type]
+
+    result = runner.invoke(
+        app, ["sync", "-o", str(tmp_path), "--from-plan", str(plano)]
+    )
+
+    assert result.exit_code == 1
+    assert "Plano inválido" in result.output
+    assert net.downloads == []
+
+
+def test_cli_argparse_from_plan_com_agregados_diferentes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import pytest
+
+    import ibge_sidra_fetcher.cli as cli
+
+    net = _MultiClient(falha_em={7060})
+    monkeypatch.setattr(cli, "SidraClient", lambda *a, **k: net)
+    plano = _plano(tmp_path, [_item(1705, "N1"), _item(7060, "N1")])
+
+    with pytest.raises(SystemExit) as info:
+        cli.main(["sync", "-o", str(tmp_path), "--from-plan", str(plano)])
+
+    assert info.value.code == 1
+    assert [a for a, _ in net.downloads] == [1705]  # o outro falhou, saída 1

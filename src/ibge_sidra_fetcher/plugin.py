@@ -27,7 +27,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from ibge_sidra_fetcher.check import check_agregado
+from ibge_sidra_fetcher.check import agrupar_plano, check_agregado
 from ibge_sidra_fetcher.cli import _parse_classificacoes, _parse_lista
 from ibge_sidra_fetcher.download import describe_download_plan, nomes_do_plano
 from ibge_sidra_fetcher.fetcher import SidraClient
@@ -377,31 +377,65 @@ def _run_sync(
         if not dl:
             console.print("[green]Nada a baixar:[/green] plano sem ação 'download'.")
             return
-        filtros = dict(dl[0].entry.get("filtros") or {})
         try:
-            agregado_id = int(dl[0].entry.get("agregado_id", agregado_id))
-        except (TypeError, ValueError) as exc:
-            console.print(f"[red]Plano inválido:[/red] agregado_id ({exc})")
+            pedidos = agrupar_plano([it.entry for it in dl], agregado_id)
+        except ValueError as exc:
+            console.print(f"[red]Plano inválido:[/red] {exc}")
             raise typer.Exit(1) from None
-        niveis_list = sorted({str(it.entry.get("nivel", "")) for it in dl} or {None})
-        filtros["niveis_territoriais"] = [n for n in niveis_list if n]
         console.print(
             f"[dim]Plano {from_plan}: {len(dl)} nível(is) com ação 'download' "
-            f"de {len(plan.items)} verificado(s).[/dim]"
+            f"de {len(plan.items)} verificado(s), em {len(pedidos)} pedido(s) "
+            f"(agregado e filtros).[/dim]"
         )
-    else:
-        if agregado_id is None:
+        # Cada agregado do plano é baixado; uma falha não impede os demais, mas o
+        # comando termina com erro.
+        falhas: list[int] = []
+        for ag_id, filtros_plano, niveis_plano in pedidos:
+            if len(pedidos) > 1:
+                console.print(
+                    f"[dim]Agregado {ag_id}: níveis "
+                    f"{', '.join(niveis_plano) or 'todos'}[/dim]"
+                )
+            try:
+                _sync_agregado(
+                    ag_id, filtros_plano, output, workers, delay, dry_run, verbose
+                )
+            except typer.Exit as exc:
+                if exc.exit_code == 0:
+                    continue
+                if exc.exit_code == 130:  # interrompido pelo usuário: não segue
+                    raise
+                falhas.append(ag_id)
+        if falhas:
             console.print(
-                "[red]Erro:[/red] informe o ID do agregado (ou use --from-plan)."
+                f"[red]Erro:[/red] {len(falhas)} de {len(pedidos)} pedido(s) do "
+                f"plano falharam (agregados: {', '.join(map(str, falhas))})."
             )
             raise typer.Exit(1)
-        filtros = {
-            "niveis_territoriais": _parse_lista(niveis),
-            "variaveis": _parse_lista(variaveis),
-            "periodos": _parse_lista(periodos),
-            "classificacoes": _parse_classificacoes(classificacao),
-        }
+        return
 
+    if agregado_id is None:
+        console.print("[red]Erro:[/red] informe o ID do agregado (ou use --from-plan).")
+        raise typer.Exit(1)
+    filtros = {
+        "niveis_territoriais": _parse_lista(niveis),
+        "variaveis": _parse_lista(variaveis),
+        "periodos": _parse_lista(periodos),
+        "classificacoes": _parse_classificacoes(classificacao),
+    }
+    _sync_agregado(agregado_id, filtros, output, workers, delay, dry_run, verbose)
+
+
+def _sync_agregado(
+    agregado_id: int,
+    filtros: dict,
+    output: Path,
+    workers: int,
+    delay: float,
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """Planeja e baixa um agregado (um pedido de `sync`); ``typer.Exit(1)`` em erro."""
     with SidraClient() as client:
         try:
             agregado = client.get_agregado(agregado_id)
